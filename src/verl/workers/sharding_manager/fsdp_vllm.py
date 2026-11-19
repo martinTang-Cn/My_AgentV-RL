@@ -289,6 +289,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         model = self.model_runner.model
         if peft_config:
             if self.base_sync_done:
+                if not updated_params:
+                    raise RuntimeError("No LoRA tensors were collected from the training model")
                 lora_int_id = int(time.time_ns() % 0x7FFFFFFF)
                 lora_reqest = TensorLoRARequest(
                     lora_name=f"{lora_int_id}",
@@ -297,7 +299,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     peft_config=asdict(peft_config),
                     lora_tensors=updated_params,
                 )
-                self.inference_engine.llm_engine.add_lora(lora_reqest)
+                if not self.inference_engine.llm_engine.add_lora(lora_reqest):
+                    raise RuntimeError("vLLM failed to install the current LoRA adapter")
                 logger.info(f"vLLM load weights, loaded_params: {len(updated_params)}")
                 return
             else:

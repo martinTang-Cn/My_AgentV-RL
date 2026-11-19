@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import warnings
+from copy import copy
 from dataclasses import asdict, dataclass
 from typing import Optional
 
@@ -23,13 +24,15 @@ import torch
 import torch.distributed
 from accelerate import init_empty_weights
 from omegaconf import DictConfig
+from peft import PeftModel
+from safetensors.torch import save_file
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
 from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
 
-from verl.utils.device import is_cuda_available
+from verl.utils.device import get_device_name, is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
-from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
+from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_peft_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
 
 from .checkpoint_manager import BaseCheckpointManager
@@ -294,7 +297,22 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # wait for everyone to dump to local
         torch.distributed.barrier()
 
-        if self.should_save_hf_model:
+        unwrapped_model = getattr(self.model, "_fsdp_wrapped_module", self.model)
+        if isinstance(unwrapped_model, PeftModel):
+            state_dict = get_fsdp_full_state_dict(self.model, offload_to_cpu=get_device_name() != "cpu", rank0_only=True)
+            if self.rank == 0:
+                adapter_path = local_mkdir_safe(os.path.join(local_path, "lora_adapter"))
+                adapter_state = get_fsdp_peft_state_dict(unwrapped_model, state_dict)
+                if not adapter_state:
+                    raise RuntimeError("No LoRA tensors were collected for the checkpoint")
+                save_file(adapter_state, os.path.join(adapter_path, "adapter_model.safetensors"), metadata={"format": "pt"})
+                adapter_config = copy(unwrapped_model.peft_config["default"])
+                adapter_config.inference_mode = True
+                adapter_config.save_pretrained(adapter_path)
+                log_with_rank(f"Saved LoRA adapter to {adapter_path}", rank=self.rank, logger=logger)
+            del state_dict
+            torch.distributed.barrier()
+        elif self.should_save_hf_model:
             # Only rank 0 will save hf model and,
             # offload to cpu to save LLMs which may be too large to fit in one GPU
             state_dict = get_fsdp_full_state_dict(self.model, offload_to_cpu=True, rank0_only=True)

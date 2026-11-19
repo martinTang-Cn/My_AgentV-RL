@@ -35,9 +35,9 @@ model:
   external_lib: null
   enable_gradient_checkpointing: True
   trust_remote_code: False
-  lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
-  lora_alpha: 16  # LoRA scaling factor
-  target_modules: all-linear  # Target modules for LoRA adaptation
+  lora_rank: 16
+  lora_alpha: 32
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
   use_liger: False
   strategy: fsdp # fsdp2会因为缺少torch接口报错，请不要用它 我也不知道为什么verl要调用私有接口
 optim:
@@ -69,17 +69,15 @@ trainer:
   # "auto": resume from last checkpoint if available
   # "disable": start from scratch
   # "resume_path": resume from a user-defined path
-  resume_mode: auto
+  resume_mode: disable
 
   # Path to resume training from (used when resume_mode is "resume_path" or "auto")
   resume_from_path: null
 
   # Checkpoint configuration
   checkpoint:
-    # What to include in saved checkpoints
-    # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
-    # save_contents: ["model", "optimizer", "extra"]
-    save_contents: ["hf_model"]
+    # FSDP exports the trained PEFT adapter. Add model, optimizer, and extra for exact resume.
+    save_contents: ["lora_adapter"]
     # For more flexibility, you can specify the contents to load from the checkpoint.
     load_contents: ${trainer.checkpoint.save_contents}
   device: cuda

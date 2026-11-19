@@ -115,8 +115,20 @@ class TaskRunner:
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
-        pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
+
+        model_config = config.actor_rollout_ref.model
+        adapter_path = model_config.get("lora_adapter_path")
+        if adapter_path:
+            from peft import LoraConfig, PeftConfig
+
+            if config.actor_rollout_ref.actor.strategy not in {"fsdp", "fsdp2"}:
+                raise ValueError("Loading an initial LoRA adapter requires an FSDP actor")
+            adapter_config = PeftConfig.from_pretrained(copy_to_local(adapter_path))
+            if not isinstance(adapter_config, LoraConfig):
+                raise ValueError(f"Expected a LoRA adapter at {adapter_path}")
+            model_config.lora_rank = adapter_config.r
+        pprint(OmegaConf.to_container(config, resolve=True))
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on

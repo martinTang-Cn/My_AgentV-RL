@@ -15,11 +15,9 @@
 The main entry point to run the PPO algorithm
 """
 
-import json
 import logging
 import os
 import warnings
-from dataclasses import asdict
 from typing import Any
 
 import psutil
@@ -28,8 +26,7 @@ import torch.distributed
 import torch.distributed as dist
 from codetiming import Timer
 from omegaconf import DictConfig, OmegaConf, open_dict
-from peft import LoraConfig, TaskType, get_peft_model
-from safetensors.torch import save_file
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -61,7 +58,6 @@ from verl.utils.fsdp_utils import (
     get_fsdp_wrap_policy,
     get_init_weight_context_manager,
     init_fn,
-    layered_summon_lora_params,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
     offload_fsdp_model_to_cpu,
@@ -271,8 +267,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             print(f"Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
+        adapter_path = self.config.model.get("lora_adapter_path")
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not actor_model_config.tie_word_embeddings and not adapter_path, mesh=self.device_mesh
         )
 
         with init_context(), warnings.catch_warnings():
@@ -316,16 +313,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if self._is_lora:
                 print("Applying LoRA to actor module")
                 actor_module.enable_input_require_grads()
-                # Convert config to regular Python types before creating PEFT model
-                lora_config = {
-                    "task_type": TaskType.CAUSAL_LM,
-                    "r": self.config.model.lora_rank,
-                    "lora_alpha": self.config.model.lora_alpha,
-                    "target_modules": convert_to_regular_types(self.config.model.target_modules),
-                    "exclude_modules": convert_to_regular_types(self.config.model.exclude_modules),
-                    "bias": "none",
-                }
-                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+                if adapter_path:
+                    local_adapter = copy_to_local(adapter_path)
+                    actor_module = PeftModel.from_pretrained(
+                        actor_module, local_adapter, is_trainable=role == "actor" and self._is_actor
+                    )
+                else:
+                    lora_config = {
+                        "task_type": TaskType.CAUSAL_LM,
+                        "r": self.config.model.lora_rank,
+                        "lora_alpha": self.config.model.lora_alpha,
+                        "target_modules": convert_to_regular_types(self.config.model.target_modules),
+                        "exclude_modules": convert_to_regular_types(self.config.model.exclude_modules),
+                        "bias": "none",
+                    }
+                    actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -478,6 +480,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # TODO: a sharding manager that do nothing?
 
         elif rollout_name == "vllm":
+            if self._is_lora and self.config.rollout.mode == "sync":
+                # The synchronous FSDP sharding manager accesses the vLLM V0 worker directly.
+                os.environ.setdefault("VLLM_USE_V1", "0")
             from verl.workers.rollout.vllm_rollout import vLLMRollout
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
 
@@ -856,7 +861,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: DataProto):
-        if self._is_lora:
+        if self._is_lora and not self.config.model.get("lora_adapter_path"):
             # if _is_lora, actor without lora applied is the ref
             data.meta_info["is_lora"] = True
             data = self.compute_log_prob(data)
@@ -891,8 +896,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
-        from verl.utils.logger import log_with_rank
-
         # only support save and load ckpt for actor
         assert self._is_actor
 
@@ -903,37 +906,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
         )
         dist.barrier()
-
-        if self._is_lora and hasattr(getattr(self, "actor_module", self.actor_module_fsdp), "peft_config"):
-            lora_save_path = os.path.join(local_path, "lora_adapter")
-            peft_model = getattr(self, "actor_module", self.actor_module_fsdp)
-            peft_config = {}
-            if dist.get_rank() == 0:
-                os.makedirs(lora_save_path, exist_ok=True)
-                peft_config = asdict(peft_model.peft_config.get("default", {}))
-                peft_config["task_type"] = peft_config["task_type"].value
-                peft_config["peft_type"] = peft_config["peft_type"].value
-                peft_config["target_modules"] = list(peft_config["target_modules"])
-            try:
-                if fsdp_version(self.actor_module_fsdp) > 0:
-                    self.actor_module_fsdp = self.actor_module_fsdp.to(get_device_name())
-                    lora_params = layered_summon_lora_params(self.actor_module_fsdp)
-                    if dist.get_rank() == 0:
-                        save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
-                        with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding="utf-8") as f:
-                            json.dump(peft_config, f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                log_with_rank(
-                    f"Save LoRA Adapter Error ({e})", rank=dist.get_rank(), logger=logger, log_only_rank_0=True
-                )
-
-            dist.barrier()
-            log_with_rank(
-                f"[rank-{self.rank}]: Saved LoRA adapter to: {lora_save_path}",
-                rank=dist.get_rank(),
-                logger=logger,
-                log_only_rank_0=True,
-            )
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)

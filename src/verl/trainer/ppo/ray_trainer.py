@@ -576,7 +576,8 @@ class RayPPOTrainer:
         self.validation_generations_logger = ValidationGenerationsLogger()
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        self.ref_in_actor = config.actor_rollout_ref.model.get("lora_rank", 0) > 0
+        model_config = config.actor_rollout_ref.model
+        self.ref_in_actor = model_config.get("lora_rank", 0) > 0 and not model_config.get("lora_adapter_path")
 
         # define in-reward KL control
         # kl loss control currently not suppoorted

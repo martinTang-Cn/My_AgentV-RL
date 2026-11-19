@@ -40,6 +40,12 @@ actor_rollout_ref:
   # Whether it's a hybrid engine, currently only supports hybrid engine
   hybrid_engine: true
 
+  actor:
+
+    # Export the PEFT adapter. Add model, optimizer, and extra for exact resume.
+    checkpoint:
+      save_contents: ["lora_adapter"]
+
   # common configs for the model
   model:
 
@@ -68,14 +74,17 @@ actor_rollout_ref:
     use_remove_padding: false
 
     # Set to positive value to enable LoRA (e.g., 32)
-    lora_rank: 0
+    lora_rank: 16
 
     # LoRA scaling factor
-    lora_alpha: 16
+    lora_alpha: 32
+
+    # Optional SFT adapter directory. Its PEFT config determines the LoRA settings when provided.
+    lora_adapter_path: null
 
     # Target modules to apply LoRA. Options: "all-linear" (not recommended for VLMs) or
     # [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]
-    target_modules: all-linear
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
     # Exclude modules from applying Lora. Similar usage to target_modules and Peft.
     # Example: '.*visual.*' for excluding the ViT in Qwen2.5-VL, as currently vllm does not support ViT Lora.
@@ -100,7 +109,7 @@ actor_rollout_ref:
 
   # Rollout model config.
   rollout:
-    name: vllm-agent
+    name: vllm
     temperature: 0.7
     top_k: 20 # 0 for hf rollout, -1 for vllm rollout
     top_p: 0.9
@@ -115,7 +124,8 @@ actor_rollout_ref:
     ignore_eos: False
     enforce_eager: False
     free_cache_engine: True
-    load_format: dummy_dtensor
+    load_format: safetensors
+    layered_summon: true
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 4096
     max_num_seqs: 96
@@ -161,7 +171,7 @@ actor_rollout_ref:
 
   extra:
     # tool config path
-    agent_config_path: /root/workspace/agent-rm/Agent-Verifier/config/train_grpo.yaml
+    agent_config_path: null
 
     enable_thinking: True
 
@@ -198,7 +208,7 @@ algorithm:
   lam: 1.0
 
   # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
-  adv_estimator: gae
+  adv_estimator: grpo
 
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
@@ -357,7 +367,7 @@ trainer:
   # "auto": resume from last checkpoint if available
   # "disable": start from scratch
   # "resume_path": resume from a user-defined path
-  resume_mode: auto
+  resume_mode: disable
 
   # Path to resume training from (only used when resume_mode is "resume_path")
   resume_from_path: null

@@ -190,11 +190,16 @@ bash examples/run_refine_entry.sh \
 bash examples/train_sft_multiturn.sh
 ```
 
+The launcher reads `data/sft/sft_multiturn_train.parquet` and `data/sft/sft_multiturn_test.parquet`. Set `TRAIN_FILES` and `VAL_FILES` to override those paths. It uses Qwen3-4B with LoRA rank 16 and alpha 32 by default. The adapter is exported to `checkpoints/sft-qwen3-4b-lora/global_step_<step>/lora_adapter/`.
+
 #### GRPO
 
 ```bash
-bash examples/train_grpo.sh
+SFT_ADAPTER_PATH=/path/to/sft/global_step_100/lora_adapter \
+  bash examples/train_grpo.sh
 ```
+
+Set `MODEL_PATH` to the same base model for both launchers when using a local model directory. GRPO reads `data/grpo/train.parquet` and `data/grpo/test.parquet` by default and continues training the SFT adapter. The GRPO adapter is exported under `global_step_<step>/actor/lora_adapter/` in the GRPO output directory. Both launchers default to four GPUs on one node. Set `NPROC_PER_NODE` for SFT or `NGPUS_PER_NODE` for GRPO to match your allocation.
 
 ---
 

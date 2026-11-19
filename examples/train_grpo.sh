@@ -1,8 +1,8 @@
-set -x
+#!/usr/bin/env bash
+set -euo pipefail
 
 export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export NCCL_TIMEOUT=3600  
 export HYDRA_FULL_ERROR=1
 export TOKENIZERS_PARALLELISM=false
@@ -15,31 +15,34 @@ export RAY_BACKEND_LOG_LEVEL=DEBUG
 
 
 # verl path in src
-SRC_DIR="Agentic-Verfifier/src"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+SRC_DIR="$REPO_DIR/src"
+export PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 
 
 PROJECT_NAME=Agentic-Verifier-GRPO  # project name
-EXP_NAME= # exp name
+EXP_NAME=${EXP_NAME:-grpo-qwen3-4b-lora}
 
-ACTOR_MODEL_PATH=Qwen3-4B
+ACTOR_MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-4B}
+SFT_ADAPTER_PATH=${SFT_ADAPTER_PATH:-null}
 
-SAVE_BASE_DIR=/checkpoints
+SAVE_BASE_DIR=${SAVE_BASE_DIR:-$REPO_DIR/checkpoints}
 PROJECT_DIR=${PROJECT_NAME}/${EXP_NAME}
 
-train_files=train.parquet
-test_files=test.parquet
+train_files=${TRAIN_FILES:-$REPO_DIR/data/grpo/train.parquet}
+test_files=${VAL_FILES:-$REPO_DIR/data/grpo/test.parquet}
 
 ROLLOUT_N=8
 
 CONFIG_DIR=${SRC_DIR}/verl/config/RL
 CONFIG_NAME=grpo_verifier # verl config name
 REWAED_FN_PATH=${SRC_DIR}/verl/utils/reward_score/agent_verifier.py
-AGENT_CONFIG_PATH=config/train_grpo_local.yaml
+AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-$REPO_DIR/config/default.yml}
 ENABLE_THINKING=True
 
-n_gpus_per_node=8
-nnodes=4
+n_gpus_per_node=${NGPUS_PER_NODE:-4}
+nnodes=${NNODES:-1}
 
 export WANDB_DIR=${SAVE_BASE_DIR}/${PROJECT_DIR}
 
@@ -52,7 +55,11 @@ SHARED_ROOT=${SHARED_ROOT:-"/tmp"}
 
 RAY_PORT=${RAY_PORT:-6380}
 
-CLUSTER_DIR="${SHARED_ROOT}/${EXP_NAME}"
+if (( NNODES == 1 )); then
+    CLUSTER_DIR=$(mktemp -d "$SHARED_ROOT/agentv-grpo.XXXXXX")
+else
+    CLUSTER_DIR="$SHARED_ROOT/$EXP_NAME"
+fi
 LOCK_DIR="${CLUSTER_DIR}/lock"
 HEAD_IP_FILE="${CLUSTER_DIR}/head_ip"
 
@@ -63,30 +70,25 @@ THIS_IP=${THIS_IP:-$(hostname -I | awk '{print $1}')}
 echo "[NODE] Hostname: $(hostname), IP: ${THIS_IP}"
 echo "[NODE] Shared cluster dir: ${CLUSTER_DIR}"
 
-export HYDRA_OVERRIDE_hydra.run.dir="/hydra/${EXP_NAME}"
-export HYDRA_OVERRIDE_hydra.output_subdir="null"
-
-
-
 if mkdir "${LOCK_DIR}" 2>/dev/null; then
     echo "[HEAD] I AM HEAD NODE."
-
-    echo "${THIS_IP}" > "${HEAD_IP_FILE}"
-    echo "[HEAD] Wrote HEAD_IP: ${THIS_IP}"
-
-    ray stop || true
 
     ray start --head \
         --node-ip-address="${THIS_IP}" \
         --port="${RAY_PORT}" \
         --num-gpus="${NGPUS_PER_NODE}"
 
+    cleanup_head() {
+        ray stop || true
+        rm -f -- "$HEAD_IP_FILE"
+        rmdir -- "$LOCK_DIR" "$CLUSTER_DIR" 2>/dev/null || true
+    }
+    trap cleanup_head EXIT
+
+    echo "${THIS_IP}" > "${HEAD_IP_FILE}"
     echo "[HEAD] Ray head started at ${THIS_IP}:${RAY_PORT}"
     export RAY_ADDRESS="${THIS_IP}:${RAY_PORT}"
     echo "[HEAD] Export RAY_ADDRESS=${RAY_ADDRESS}"
-
-    cd 
-    echo "[HEAD] CWD: $(pwd)"
 
     export DESIRED_GPUS=$((NNODES * NGPUS_PER_NODE))
     echo "[HEAD] Waiting for ${DESIRED_GPUS} GPUs in the cluster..."
@@ -110,9 +112,8 @@ else:
     print("[HEAD][WAIT] Timeout waiting for GPUs, proceed anyway (may crash in trainer).")
 ray.shutdown()
 PY
-    rm -rf ${CLUSTER_DIR}
     echo "[HEAD] Launch training"
-    python3 -m verl.trainer.main_ppo --config-path=$CONFIG_DIR --config-name=$CONFIG_NAME\
+    python3 -m verl.trainer.main_ppo --config-path="$CONFIG_DIR" --config-name="$CONFIG_NAME" \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
@@ -122,7 +123,8 @@ PY
     data.max_response_length=25600 \
     data.filter_overlong_prompts=True \
     data.truncation='right' \
-    actor_rollout_ref.model.path=$ACTOR_MODEL_PATH \
+    actor_rollout_ref.model.path="$ACTOR_MODEL_PATH" \
+    actor_rollout_ref.model.lora_adapter_path="$SFT_ADAPTER_PATH" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -152,8 +154,7 @@ PY
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
     actor_rollout_ref.rollout.val_kwargs.n=4 \
     actor_rollout_ref.rollout.forward_ratio=0.5 \
-    actor_rollout_ref.actor.checkpoint.save_contents='["hf_model"]' \
-    actor_rollout_ref.extra.agent_config_path=$AGENT_CONFIG_PATH\
+    actor_rollout_ref.extra.agent_config_path="$AGENT_CONFIG_PATH" \
     actor_rollout_ref.extra.use_multiturn_wrapper=True \
     actor_rollout_ref.extra.use_dynamic_sampling=True \
     actor_rollout_ref.extra.enable_thinking=${ENABLE_THINKING} \
@@ -170,15 +171,12 @@ PY
     trainer.nnodes=$nnodes \
     trainer.save_freq=5 \
     trainer.test_freq=5 \
-    trainer.rollout_data_dir=${SAVE_BASE_DIR}/${PROJECT_DIR}/rollout_data  \
+    trainer.rollout_data_dir=${SAVE_BASE_DIR}/${PROJECT_DIR}/rollout_data \
     trainer.validation_data_dir=${SAVE_BASE_DIR}/${PROJECT_DIR}/validation_data \
     trainer.verl_dir=$SRC_DIR \
-    trainer.total_epochs=200 $@ \
-    2>&1 | tee -a /logs/${PROJECT_NAME}_${EXP_NAME}.log
+    trainer.total_epochs=200 "$@"
 
     echo "[HEAD] Training finished. Stopping Ray..."
-    ray stop || true
-
 else
     echo "[WORKER] I AM WORKER NODE. Waiting for HEAD_IP..."
 

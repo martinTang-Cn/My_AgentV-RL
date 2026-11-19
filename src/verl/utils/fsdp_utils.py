@@ -516,9 +516,27 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def layered_summon_lora_params(fsdp_module) -> OrderedDict:
+def get_fsdp_peft_state_dict(peft_model, state_dict) -> dict:
     from peft.utils.save_and_load import get_peft_model_state_dict
 
+    # FSDP state dicts use unwrapped names. PEFT versions that inspect named_modules
+    # need the actual wrapped paths long enough to identify which tensors to export.
+    wrapper = "_fsdp_wrapped_module."
+    module_paths = {}
+    for name, _ in peft_model.named_modules():
+        if name:
+            wrapped_path = f"{name}."
+            module_paths.setdefault(wrapped_path.replace(wrapper, ""), wrapped_path)
+    wrapped_state = {}
+    for key, tensor in state_dict.items():
+        parent, sep, parameter = key.rpartition(".")
+        prefix = f"{parent}{sep}"
+        wrapped_state[f"{module_paths.get(prefix, prefix)}{parameter}"] = tensor
+    adapter_state = get_peft_model_state_dict(peft_model, state_dict=wrapped_state)
+    return {key.replace(wrapper, ""): tensor for key, tensor in adapter_state.items()}
+
+
+def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     def __prefix_submodules(module, prefix):
         for name, submodule in module.named_modules():
             if name.startswith(prefix) and "." not in name[len(prefix) :]:
@@ -538,19 +556,18 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:
         for name, submodule in __prefix_submodules(fsdp_module, prefix):
-            prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
             if name.endswith(".model") or name.endswith(".layers"):
                 continue
-            if fsdp_version(submodule) > 0:
-                with FSDP.summon_full_params(submodule, writeback=False):
-                    sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=submodule.state_dict())
-                    sub_lora_params = {
-                        f"{prefix}.{name}": param.full_tensor().detach().cpu()
-                        if hasattr(param, "full_tensor")
-                        else param.detach().cpu()
-                        for name, param in sub_lora_params.items()
-                    }
-                    lora_params.update(sub_lora_params)
+            fsdp_ver = fsdp_version(submodule)
+            if fsdp_ver > 0:
+                module_path = name.removeprefix("_fsdp_wrapped_module.")
+                state = get_fsdp_full_state_dict(submodule, offload_to_cpu=False, rank0_only=False)
+                # PEFT matches adapter tensors against the full module paths of the wrapped model.
+                prefixed_state = {f"{module_path}.{key}": param for key, param in state.items()}
+                adapter_state = get_fsdp_peft_state_dict(peft_model, prefixed_state)
+                lora_params.update({key: param.detach().cpu() for key, param in adapter_state.items()})
+                if fsdp_ver == 1:
                     submodule._is_root = False
+                del state, prefixed_state, adapter_state
                 get_torch_device().empty_cache()
     return lora_params

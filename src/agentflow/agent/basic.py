@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Any, Optional, Callable
 from contextlib import contextmanager
+from concurrent.futures import CancelledError
 
 from .context import AgentContext
 from agentflow.core.interfaces import CanGenerate
@@ -97,6 +98,8 @@ class ToolDrivenAgent(CanGenerate):
             batch_extra = [contexts[i].meta for i in active]
             try:
                 texts, backend_metas = self.backend.generate(batch_inputs, extra=batch_extra, **kwargs)
+            except CancelledError:
+                raise
             except Exception as e:
                 self.logger.exception(e)
                 break

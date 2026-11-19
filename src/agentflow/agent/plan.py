@@ -197,11 +197,15 @@ Requirements:
         self,
         questions: List[str],
         answers: List[str],
+        *,
+        on_stage=None,
         **kwargs,
     ) -> Tuple[List[List[Message]], List[Dict]]:
         
         assert len(questions)==len(answers), "Questioins and answers should be in the same size"
         # stage 1
+        if on_stage is not None:
+            on_stage("planning")
         start_msgs = [[
             {"role":"system","content": self.system_prompt},
             {"role":"user","content": self.DEFAULT_USER_INIT.format(question = q, answer = a)}
@@ -216,6 +220,8 @@ Requirements:
             full_msgs[idx].extend(context.all_round_messages())
             
         # stage 2
+        if on_stage is not None:
+            on_stage("validation")
         for fms, answer in zip(full_msgs, answers):
             fms.append(Message(role="user",content=self.DEFAULT_USER_STAGE_SUBTASK_BEGIN))
         
@@ -250,6 +256,8 @@ Requirements:
             active_subtasks_idxs = next_active_idxs
             
         # stage 3
+        if on_stage is not None:
+            on_stage("verdict")
         for fms, answer in zip(full_msgs, answers):
             fms.append(Message(role="user",content=self.DEFAULT_USER_STAGE_REVIEW_MIDDLE))
             
@@ -313,6 +321,8 @@ Requirements:
         context: AgentContext
     ):
         last_msg = context.last_message()
+        if "<end_of_analysis/>" in last_msg.content:
+            return True
         has_tag = ("<step/>" in last_msg.content)
         cands = find_tags(last_msg.content, ["python"])
         if cands :
@@ -492,11 +502,15 @@ Requirements:
         self,
         questions: List[str],
         answers: List[str],
+        *,
+        on_stage=None,
         **kwargs,
     ) -> Tuple[List[List[Message]], List[Dict]]:
         
         assert len(questions)==len(answers), "Questioins and answers should be in the same size"
         # stage 1
+        if on_stage is not None:
+            on_stage("planning")
         start_msgs = [[
             {"role":"system","content": self.system_prompt},
             {"role":"user","content": self.DEFAULT_USER_INIT.format(question = q, answer = a)}
@@ -511,6 +525,8 @@ Requirements:
             full_msgs[idx].extend(context.all_round_messages())
             
         # stage 2
+        if on_stage is not None:
+            on_stage("validation")
         for fms, answer in zip(full_msgs, answers):
             fms.append(Message(role="user",content=self.DEFAULT_USER_STAGE_SUBTASK_BEGIN))
         
@@ -545,6 +561,8 @@ Requirements:
             active_subtasks_idxs = next_active_idxs
             
         # stage 3
+        if on_stage is not None:
+            on_stage("verdict")
         for fms, answer in zip(full_msgs, answers):
             fms.append(Message(role="user",content=self.DEFAULT_USER_STAGE_REVIEW_MIDDLE))
             
@@ -608,6 +626,8 @@ Requirements:
         context: AgentContext
     ):
         last_msg = context.last_message()
+        if "<end_of_analysis/>" in last_msg.content:
+            return True
         has_tag = ("<step/>" in last_msg.content)
         cands = find_tags(last_msg.content, ["python"])
         if cands :

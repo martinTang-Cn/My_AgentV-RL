@@ -212,6 +212,12 @@ def generate_candidates(args):
     from agentflow.utils.math.answer_parser import grade_answer_verl
 
     problems = load_problems(args)
+    if args.max_candidates is not None:
+        max_problems, remainder = divmod(args.max_candidates, SAMPLES_PER_PROBLEM)
+        if remainder and len(problems) > max_problems:
+            LOGGER.info("Rounding candidate limit down to %d to keep complete groups of %d",
+                        max_problems * SAMPLES_PER_PROBLEM, SAMPLES_PER_PROBLEM)
+        problems = problems[:max_problems]
     sample = build_candidate_sampler(args)
 
     with TemporaryDirectory(dir=args.output_dir) as temp_dir:
@@ -237,7 +243,7 @@ def generate_candidates(args):
                 labeled += len(batch)
                 progress.set_postfix_str(f"labeled problems {labeled:,}/{len(problems):,}")
         temporary.replace(args.output_dir / "candidates.jsonl")
-    LOGGER.info("Saved candidates for %d problems", len(problems))
+    LOGGER.info("Saved %d candidates for %d problems", len(problems) * SAMPLES_PER_PROBLEM, len(problems))
 
 
 def mixed_gradeable_problems(path, stats):
@@ -528,6 +534,8 @@ def parse_args():
     parser.add_argument("--api-token-limit-field", choices=("max_completion_tokens", "max_tokens"),
                         default="max_completion_tokens", help="Token limit parameter accepted by the API teacher")
     parser.add_argument("--max-problems-per-source", type=int, help="Optional cap for a small run")
+    parser.add_argument("--max-candidates", type=int,
+                        help="Global candidate cap across all sources, rounded down to complete groups of eight")
     parser.add_argument("--solver-batch-size", type=int, default=16, help="Number of problems per solver batch")
     parser.add_argument("--verifier-batch-size", type=int,
                         help="Problems per verifier batch (default: 1 for OpenAI, 8 for vLLM)")
@@ -541,6 +549,8 @@ def parse_args():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
+    if args.max_candidates is not None and args.max_candidates < SAMPLES_PER_PROBLEM:
+        parser.error(f"--max-candidates must be at least {SAMPLES_PER_PROBLEM}")
     if args.verifier_batch_size is None:
         args.verifier_batch_size = 1 if args.verifier_backend == "openai" else 8
     for name in ("max_problems_per_source", "solver_batch_size", "verifier_batch_size", "solver_max_tokens",
